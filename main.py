@@ -44,5 +44,6 @@ if __name__ == "__main__":
     file_path = os.getenv("DATASET_PATH")
     data: pd.DataFrame = load_csv_data(file_path)
     data.rename(columns=DATASET_COLUMN_NAMES, inplace=True) 
-    plot_correlation_matrix(data)
     plot_distribution(data, "Heating Load")
+    plot_correlation_matrix(data)
+    
