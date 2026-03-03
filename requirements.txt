@@ -16,3 +16,5 @@ ipykernel~=6.25
 
 # Utilities
 scipy~=1.11
+
+dotenv
