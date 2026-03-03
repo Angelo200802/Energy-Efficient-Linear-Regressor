@@ -22,12 +22,14 @@ def plot_distribution(data: pd.DataFrame, label: str) -> None:
     plt.title(f"Distribution of {label}")
     plt.xlabel(label)
     plt.ylabel("Frequency")
+    plt.savefig(f"./img/{label.lower().replace(' ', '_')}_distribution.png")
     plt.show()
 
 def plot_correlation_matrix(data: pd.DataFrame) -> None:
     plt.figure(figsize=(10, 8))
     sns.heatmap(data.corr(), annot=True, cmap='coolwarm', fmt=".2f")
     plt.title("Correlation Matrix")
+    plt.savefig("./img/correlation_matrix.png")
     plt.show()
 
 def load_csv_data(file_path: str) -> pd.DataFrame:
