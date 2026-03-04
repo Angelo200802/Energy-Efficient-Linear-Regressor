@@ -4,6 +4,9 @@ import seaborn as sns
 import dotenv
 import os
 import statsmodels.api as sm
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from numpy.linalg import det, cond
+from scipy.stats import zscore
 
 # Configurazione stile grafici
 plt.style.use('seaborn-v0_8-darkgrid')
@@ -23,6 +26,30 @@ DATASET_COLUMN_NAMES = {
     "Y1": "Heating Load",
     "Y2": "Cooling Load"
 }
+
+def evaluate_multicollinearity(df):
+    # 1. Matrice di Correlazione
+    corr_matrix = df.corr()
+    
+    # 2. Determinante
+    d = det(corr_matrix)
+    
+    # 3. Condition Number (sulla matrice dei dati standardizzata)
+    c_number = cond(df.values)
+    
+    # 4. VIF e R^2 ausiliario
+    # Aggiungiamo una costante per il calcolo del VIF (richiesto da statsmodels)
+    vif_data = pd.DataFrame()
+    vif_data["Variabile"] = df.columns
+    vif_data["VIF"] = [variance_inflation_factor(df.values, i) for i in range(df.shape[1])]
+    
+    # Calcolo R^2 ausiliario partendo dal VIF: R2 = 1 - (1/VIF)
+    vif_data["R2_ausiliario"] = 1 - (1 / vif_data["VIF"])
+    
+    print(f"Determinante della matrice di corr: {d:.6f}")
+    print(f"Condition Number: {c_number:.2f}")
+    print("\nAnalisi VIF e R2:")
+    print(vif_data)
 
 def print_covariance_matrix(data: pd.DataFrame) -> None:
     """Stampa la matrice di varianze e covarianze."""
@@ -119,13 +146,15 @@ if __name__ == "__main__":
     print(data.head())
     print("Data Summary:")
     data.describe() #aggiungi mediana
-    plot_distribution(data, "Heating Load")
-    plot_distribution(data, "Cooling Load")
-    plot_covariance_matrix(data)
-    plot_correlation_matrix(data)
-    plot_regression_matrix(data)
+    #plot_distribution(data, "Heating Load")
+    #plot_distribution(data, "Cooling Load")
+    #plot_covariance_matrix(data)
+    #plot_correlation_matrix(data)
+    #plot_regression_matrix(data)
+    data = data.apply(zscore)
+    evaluate_multicollinearity(data.drop(columns=["Heating Load", "Cooling Load","Relative Compactness", "Surface Area", "Roof Area"]))
 
-    X = data.drop(columns=["Heating Load", "Cooling Load", "Orientation", "Glazing Area Distribution"])
+    X = data.drop(columns=["Heating Load", "Cooling Load"])
     y_heating = data["Heating Load"]
     y_cooling = data["Cooling Load"]
 
