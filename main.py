@@ -151,14 +151,16 @@ if __name__ == "__main__":
     #plot_covariance_matrix(data)
     #plot_correlation_matrix(data)
     #plot_regression_matrix(data)
-    data = data.apply(zscore)
-    evaluate_multicollinearity(data.drop(columns=["Heating Load", "Cooling Load","Relative Compactness", "Surface Area", "Roof Area"]))
+    data_zscore = data.drop(["Orientation"]).apply(zscore)
+    evaluate_multicollinearity(data_zscore.drop(columns=["Heating Load", "Cooling Load","Relative Compactness", "Surface Area", "Roof Area"]))
 
-    X = data.drop(columns=["Heating Load", "Cooling Load"])
+    df_dummies = pd.get_dummies(data, columns=['Orientation'], prefix='Ori', drop_first=True)
+    print(df_dummies.columns.tolist())
+    X = df_dummies.drop(columns=["Heating Load", "Cooling Load"])
     y_heating = data["Heating Load"]
     y_cooling = data["Cooling Load"]
 
-    X = sm.add_constant(X)
+    X = sm.add_constant(X) #intercetta
     model_heating = sm.OLS(y_heating, X).fit()
     model_cooling = sm.OLS(y_cooling, X).fit()
 
