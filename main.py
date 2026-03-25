@@ -5,6 +5,7 @@ import dotenv
 import os
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.stats.diagnostic import het_breuschpagan
 from numpy.linalg import det, cond
 from scipy.stats import zscore
 
@@ -26,6 +27,20 @@ DATASET_COLUMN_NAMES = {
     "Y1": "Heating Load",
     "Y2": "Cooling Load"
 }
+
+def plot_residui(model, model_name="Model"):
+    residuals = model.resid
+    fitted = model.fittedvalues
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.scatterplot(x=fitted, y=residuals, ax=ax, color='steelblue', edgecolor='black')
+    ax.axhline(0, color='red', linestyle='--', lw=1)
+    ax.set_title(f"Residuals vs Fitted Values: {model_name}", fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel("Fitted Values", fontsize=12)
+    ax.set_ylabel("Residuals", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(f"./img/{model_name.lower().replace(' ', '_')}_residuals.png", dpi=300, bbox_inches='tight')
+    plt.show()
 
 def evaluate_multicollinearity(df):
     # 1. Matrice di Correlazione
@@ -137,6 +152,25 @@ def load_csv_data(file_path: str) -> pd.DataFrame:
     except Exception as e:
         print(f"Error loading data: {e}")
         return None
+
+
+def breusch_pagan_test(model, model_name="Model"):
+    lm_stat, lm_pvalue, f_stat, f_pvalue = het_breuschpagan(
+        model.resid,
+        model.model.exog
+    )
+    
+    print(f"\n=== Test di Breusch-Pagan: {model_name} ===")
+    print(f"LM statistic: {lm_stat:.4f}")
+    print(f"LM p-value:   {lm_pvalue:.4f}")
+    print(f"F statistic:  {f_stat:.4f}")
+    print(f"F p-value:    {f_pvalue:.4f}")
+    
+    if lm_pvalue < 0.05:
+        print("Conclusione: evidenza di eteroschedasticità.")
+    else:
+        print("Conclusione: non emerge eteroschedasticità.")
+
     
 if __name__ == "__main__":
     file_path = os.getenv("DATASET_PATH")
@@ -191,3 +225,7 @@ if __name__ == "__main__":
     print(model_heating.summary())
     print("\n=== RISULTATI COOLING LOAD ===")
     print(model_cooling.summary())
+    plot_residui(model_heating, "Heating Load")
+    plot_residui(model_cooling, "Cooling Load")
+    breusch_pagan_test(model_heating, "Heating Load")
+    breusch_pagan_test(model_cooling, "Cooling Load")
