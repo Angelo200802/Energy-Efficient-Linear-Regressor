@@ -151,19 +151,43 @@ if __name__ == "__main__":
     #plot_covariance_matrix(data)
     #plot_correlation_matrix(data)
     #plot_regression_matrix(data)
-    data_zscore = data.drop(["Orientation"]).apply(zscore)
+    data_zscore = data.drop(columns=["Orientation"]).apply(zscore)
     evaluate_multicollinearity(data_zscore.drop(columns=["Heating Load", "Cooling Load","Relative Compactness", "Surface Area", "Roof Area"]))
 
+    # 1. Creiamo le variabili dummy per l'orientamento (0 o 1)
     df_dummies = pd.get_dummies(data, columns=['Orientation'], prefix='Ori', drop_first=True)
     print(df_dummies.columns.tolist())
-    X = df_dummies.drop(columns=["Heating Load", "Cooling Load"])
+    
+    # 2. Prepariamo la matrice X rimuovendo i target e le variabili ridondanti
+    X = df_dummies.drop(columns=[
+        "Heating Load", "Cooling Load", 
+        "Relative Compactness", "Surface Area", "Roof Area"
+    ])
+    X = X.astype(float) # Convertiamo tutto in float
+
+    # 3. STANDARDIZZAZIONE (Questo uccide il Condition Number gigante!)
+    colonne_continue = ["Wall Area", "Overall Height", "Glazing Area", "Glazing Area Distribution"]
+    X[colonne_continue] = X[colonne_continue].apply(zscore)
+
+    # 4. FEATURE ENGINEERING (Le vere moltiplicazioni)
+    X["GlazingxGlazingDist"] = X["Glazing Area"] * X["Glazing Area Distribution"]
+    X["WallxHeight"] = X["Wall Area"] * X["Overall Height"]
+    
+ 
+    
+    # Rimuoviamo gli orientamenti "puri" per non confondere il modello, 
+    # teniamo solo le loro interazioni con il vetro
+    X = X.drop(columns=[c for c in ["Ori_3", "Ori_4", "Ori_5"] if c in X.columns])
+
+    # 5. Target e Modello
     y_heating = data["Heating Load"]
     y_cooling = data["Cooling Load"]
 
-    X = sm.add_constant(X) #intercetta
+    X = sm.add_constant(X) # Aggiungiamo l'intercetta alla fine
+    
     model_heating = sm.OLS(y_heating, X).fit()
     model_cooling = sm.OLS(y_cooling, X).fit()
 
-    print(model_heating.summary()) 
-    print(model_cooling.summary()) 
-    
+    print(model_heating.summary())
+    print("\n=== RISULTATI COOLING LOAD ===")
+    print(model_cooling.summary())
