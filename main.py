@@ -5,10 +5,10 @@ import dotenv
 import os
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.diagnostic import het_breuschpagan, het_white
 from numpy.linalg import det, cond
 from scipy.stats import zscore
-
+import numpy as np
 # Configurazione stile grafici
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
@@ -27,6 +27,36 @@ DATASET_COLUMN_NAMES = {
     "Y1": "Heating Load",
     "Y2": "Cooling Load"
 }
+
+def transform_to_wls(ols_model):
+    """
+    Riceve un modello OLS di statsmodels e restituisce un modello WLS
+    pesato per l'inverso del quadrato delle ordinate stimate (1 / y_hat^2).
+    """
+    # 1. Estrazione dei valori predetti (ordinate stimate)
+    y_fitted = ols_model.fittedvalues
+    
+    # 2. Controllo stabilità numerica 
+    # (I carichi termici Y1, Y2 sono positivi, ma y_hat potrebbe avere piccoli residui negativi)
+    if np.any(y_fitted <= 0):
+        print("Warning: Alcuni valori predetti sono <= 0. Applico il valore assoluto per i pesi.")
+        y_fitted = np.abs(y_fitted) + 1e-5 # Small offset per stabilità
+
+    # 3. Calcolo dei pesi: w_i = 1 / sigma_i^2
+    # Assumendo che la deviazione standard cresca linearmente con y_hat:
+    weights = 1.0 / (y_fitted ** 2)
+
+    # 4. Fit del modello WLS
+    # Recuperiamo i dati originali direttamente dall'oggetto ols_model
+    y_train = ols_model.model.endog
+    X_train = ols_model.model.exog
+    
+    wls_model = sm.WLS(y_train, X_train, weights=weights).fit()
+    
+    print("Summary WLS:")
+    print(wls_model.summary())
+    
+    return wls_model
 
 def plot_residui(model, model_name="Model"):
     residuals = model.resid
@@ -171,7 +201,74 @@ def breusch_pagan_test(model, model_name="Model"):
     else:
         print("Conclusione: non emerge eteroschedasticità.")
 
+def white_test(model, model_name="Model"):
+    lm_stat, lm_pvalue, f_stat, f_pvalue = het_white(
+        model.resid,
+        model.model.exog
+    )
     
+    print(f"\n=== Test di White: {model_name} ===")
+    print(f"LM statistic: {lm_stat:.4f}")
+    print(f"LM p-value:   {lm_pvalue:.4f}")
+    print(f"F statistic:  {f_stat:.4f}")
+    print(f"F p-value:    {f_pvalue:.4f}")
+    
+    if lm_pvalue < 0.05:
+        print("Conclusione: evidenza di eteroschedasticità.")
+    else:
+        print("Conclusione: non emerge eteroschedasticità.")
+
+import statsmodels.api as sm
+
+def fit_robust_models(ols_model, model_name="Target"):
+    """
+    Esegue sia WLS (pesi basati su y_hat) che FGLS (pesi stimati dai residui)
+    partendo da un modello OLS.
+    """
+    # 0. Recupero dati originali
+    X = ols_model.model.exog
+    y = ols_model.model.endog
+    names = ols_model.model.exog_names # Manteniamo i nomi delle variabili
+    
+    print(f"\n" + "="*60)
+    print(f" ANALISI ROBUSTA PER: {model_name}")
+    print("="*60)
+
+    # --- 1. Calcolo WLS (Pesi Proporzionali) ---
+    # Assunzione: la varianza cresce con il valore predetto
+    y_hat = np.abs(ols_model.fittedvalues) + 1e-5
+    weights_wls = 1.0 / (y_hat**2)
+    model_wls = sm.WLS(y, X, weights=weights_wls).fit()
+    
+    # --- 2. Calcolo FGLS (Feasible GLS) ---
+    # Assunzione: la varianza ha una struttura complessa legata alle X
+    resid_2 = ols_model.resid**2
+    # Regrediamo il log dei residui^2 sulle X per trovare la struttura dell'errore
+    log_resid2_model = sm.OLS(np.log(resid_2), X).fit()
+    weights_fgls = 1.0 / np.exp(log_resid2_model.fittedvalues)
+    model_fgls = sm.WLS(y, X, weights=weights_fgls).fit()
+
+    # --- 3. Output di Confronto ---
+    print(f"{'Metodo':<15} | {'R-squared':<10} | {'F-statistic':<12}")
+    print("-" * 45)
+    print(f"{'OLS':<15} | {ols_model.rsquared:.4f}     | {ols_model.fvalue:.2f}")
+    print(f"{'WLS':<15} | {model_wls.rsquared:.4f}     | {model_wls.fvalue:.2f}")
+    print(f"{'FGLS':<15} | {model_fgls.rsquared:.4f}     | {model_fgls.fvalue:.2f}")
+
+    return model_wls, model_fgls
+
+def confronta_errori_standard(ols_std, ols_white, model_name="Model"):
+    """Confronta SE classici vs HC3 e calcola il Delta %."""
+    comparison = pd.DataFrame({
+        'Coefficiente': ols_std.params.round(4),
+        'SE_Classico':  ols_std.bse.round(5),
+        'SE_Robusto_HC3': ols_white.bse.round(5),
+        'Delta_SE_%':   ((ols_white.bse - ols_std.bse) / ols_std.bse * 100).round(1)
+    })
+    print(f"\n>>> ANALISI ROBUSTEZZA SE: {model_name} <<<")
+    print(comparison)
+    return comparison
+
 if __name__ == "__main__":
     file_path = os.getenv("DATASET_PATH")
     data: pd.DataFrame = load_csv_data(file_path)
@@ -202,12 +299,9 @@ if __name__ == "__main__":
     # 3. STANDARDIZZAZIONE (Questo uccide il Condition Number gigante!)
     colonne_continue = ["Wall Area", "Overall Height", "Glazing Area", "Glazing Area Distribution"]
     X[colonne_continue] = X[colonne_continue].apply(zscore)
-
     # 4. FEATURE ENGINEERING (Le vere moltiplicazioni)
     X["GlazingxGlazingDist"] = X["Glazing Area"] * X["Glazing Area Distribution"]
     X["WallxHeight"] = X["Wall Area"] * X["Overall Height"]
-    
- 
     
     # Rimuoviamo gli orientamenti "puri" per non confondere il modello, 
     # teniamo solo le loro interazioni con il vetro
@@ -218,14 +312,79 @@ if __name__ == "__main__":
     y_cooling = data["Cooling Load"]
 
     X = sm.add_constant(X) # Aggiungiamo l'intercetta alla fine
-    
     model_heating = sm.OLS(y_heating, X).fit()
     model_cooling = sm.OLS(y_cooling, X).fit()
 
     print(model_heating.summary())
     print("\n=== RISULTATI COOLING LOAD ===")
     print(model_cooling.summary())
-    plot_residui(model_heating, "Heating Load")
-    plot_residui(model_cooling, "Cooling Load")
-    breusch_pagan_test(model_heating, "Heating Load")
-    breusch_pagan_test(model_cooling, "Cooling Load")
+    #plot_residui(model_heating, "Heating Load")
+    #plot_residui(model_cooling, "Cooling Load")
+
+    import numpy as np
+    y_heating_log = np.log(data["Heating Load"]) 
+    y_cooling_log = np.log(data["Cooling Load"])
+
+    X_base = X.copy() 
+    X_heat = X_base.drop(columns=["WallxHeight"])
+    model_heating_log = sm.OLS(y_heating_log, X_heat).fit()
+    model_heating_log_white = sm.OLS(y_heating_log, X_heat).fit(cov_type='HC3')
+    model_cooling_log = sm.OLS(y_cooling_log, X).fit()
+    model_cooling_log_white = sm.OLS(y_cooling_log, X).fit(cov_type='HC3')
+    model_heating_wls, model_heating_fgls = fit_robust_models(model_heating_log, "Heating Load Log")
+    model_cooling_wls, model_cooling_fgls = fit_robust_models(model_cooling_log, "Cooling Load Log")
+    # Stampiamo i summary
+    #print("=== SUMMARY: HEATING LOAD (LOG) ===")
+    #print(model_heating_log.summary())
+    #print("=== SUMMARY: HEATING LOAD (LOG) WLS ===")
+    #print(model_heating_wls.summary())
+    #print("\n=== SUMMARY: COOLING LOAD (LOG) ===")
+    #print(model_cooling_log.summary())
+    #print("=== SUMMARY: COOLING LOAD (LOG) WLS ===")  
+    #print(model_cooling_wls.summary())
+    #print("\n=== SUMMARY: HEATING LOAD (LOG) FGLS ===")
+    #print(model_heating_fgls.summary())
+    #print("=== SUMMARY: COOLING LOAD (LOG) FGLS ===")
+    #print(model_cooling_fgls.summary())
+
+    print("=== SUMMARY: HEATING LOAD (LOG) with White's Robust SE ===")
+    print(model_heating_log_white.summary())
+    print("\n=== SUMMARY: COOLING LOAD (LOG) with White's Robust SE ===")
+    print(model_cooling_log_white.summary())
+
+    #plot_residui(model_heating_wls, "Heating Load WLS")
+    #plot_residui(model_cooling_wls, "Cooling Load WLS")
+    #plot_residui(model_heating_fgls, "Heating Load FGLS")
+    #plot_residui(model_cooling_fgls, "Cooling Load FGLS")
+    
+    wald_test = model_heating_fgls.wald_test(np.eye(len(model_heating_fgls.params))[1:])
+    print(f"Statistica Wald (Chi2): {wald_test.statistic.item():.2f}")
+    print(f"p-value Wald: {wald_test.pvalue:.4f}")
+    # 3. Confronto SE
+    confronto_h = confronta_errori_standard(model_heating_log, model_heating_log_white, "Heating Load")
+    print("\n" + "="*60)
+    print("8======================DConfronto DIO PORCO: ",confronto_h)
+
+    # --- COOLING LOAD ---
+    # 1. Modelli OLS (Base e HC3)
+    model_cooling_log = sm.OLS(y_cooling_log, X).fit()
+    model_cooling_log_white = sm.OLS(y_cooling_log, X).fit(cov_type='HC3')
+
+    # 2. Modelli GLS (WLS e FGLS)
+    model_cooling_wls, model_cooling_fgls = fit_robust_models(model_cooling_log, "Cooling")
+
+    # 3. Confronto SE
+    confronto_c = confronta_errori_standard(model_cooling_log, model_cooling_log_white, "Cooling Load")
+    print("\n" + "="*60)
+    print("Confronto: ",confronto_c)
+
+    breusch_pagan_test(model_heating_log_white, "Heating Load WLS")
+    breusch_pagan_test(model_cooling_log_white, "Cooling Load WLS")
+    white_test(model_heating_log_white, "Heating Load WLS") 
+    white_test(model_cooling_log_white, "Cooling Load WLS")
+    #white_test(model_heating_log, "Heating Load Log OLS")
+    #white_test(model_cooling_log, "Cooling Load Log OLS")
+    #white_test(model_heating_wls, "Heating Load WLS")
+    #white_test(model_cooling_wls, "Cooling Load WLS")
+    #white_test(model_heating_fgls, "Heating Load FGLS")
+    #white_test(model_cooling_fgls, "Cooling Load FGLS")
