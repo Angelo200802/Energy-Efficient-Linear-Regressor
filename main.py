@@ -8,6 +8,12 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.diagnostic import het_breuschpagan, het_white
 from numpy.linalg import det, cond
 from scipy.stats import zscore
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error
+from sklearn.linear_model import ElasticNetCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+
 import numpy as np
 # Configurazione stile grafici
 plt.style.use('seaborn-v0_8-darkgrid')
@@ -27,6 +33,49 @@ DATASET_COLUMN_NAMES = {
     "Y1": "Heating Load",
     "Y2": "Cooling Load"
 }
+
+def find_best_regularization(X, y, nfolds=5):
+    """
+    X: DataFrame con variabili dummy (n-1 per categoria)
+    y: Target
+    """
+    # 1. Definiamo la griglia dei parametri
+    # l1_ratio: 0 è Ridge, 1 è Lasso (corrisponde al tuo alpha_grid/l1_wt)
+    l1_ratio_grid = np.linspace(0.01, 1, 100) # Evitiamo 0 netto per stabilità con ElasticNetCV
+    
+    # 2. Setup della Cross-Validation
+    kf = KFold(n_splits=nfolds, shuffle=True, random_state=123)
+    
+    # 3. Creazione della Pipeline: Standardizzazione + ElasticNetCV
+    # Nota: ElasticNetCV cerca automaticamente il miglior lambda (alpha)
+    enet_cv = ElasticNetCV(
+        l1_ratio=l1_ratio_grid,
+        alphas=200,          # Quanti lambda testare per ogni l1_ratio
+        cv=kf,
+        n_jobs=-1,             # Usa tutti i core della CPU
+        max_iter=10000         # Aumentato per garantire convergenza
+    )
+    
+    # 4. Pipeline per scalare i dati e poi fittare il modello
+    # La pipeline assicura che lo scaler impari solo dai dati di train in ogni fold
+    model_pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('regressor', enet_cv)
+    ])
+    
+    # 5. Fit del modello
+    print("Inizio ricerca del miglior modello con ElasticNetCV...")
+    model_pipeline.fit(X, y)
+    
+    # Estrazione dei risultati
+    best_model = model_pipeline.named_steps['regressor']
+    
+    print("-" * 30)
+    print(f"Miglior l1_ratio (Alpha in R): {best_model.l1_ratio_}")
+    print(f"Miglior lambda (Alpha in sklearn): {best_model.alpha_}")
+    print("-" * 30)
+    
+    return model_pipeline, {"alpha" : best_model.alpha_, "l1_ratio": best_model.l1_ratio_}
 
 def transform_to_wls(ols_model):
     """
@@ -257,18 +306,6 @@ def fit_robust_models(ols_model, model_name="Target"):
 
     return model_wls, model_fgls
 
-def confronta_errori_standard(ols_std, ols_white, model_name="Model"):
-    """Confronta SE classici vs HC3 e calcola il Delta %."""
-    comparison = pd.DataFrame({
-        'Coefficiente': ols_std.params.round(4),
-        'SE_Classico':  ols_std.bse.round(5),
-        'SE_Robusto_HC3': ols_white.bse.round(5),
-        'Delta_SE_%':   ((ols_white.bse - ols_std.bse) / ols_std.bse * 100).round(1)
-    })
-    print(f"\n>>> ANALISI ROBUSTEZZA SE: {model_name} <<<")
-    print(comparison)
-    return comparison
-
 if __name__ == "__main__":
     file_path = os.getenv("DATASET_PATH")
     data: pd.DataFrame = load_csv_data(file_path)
@@ -287,7 +324,6 @@ if __name__ == "__main__":
 
     # 1. Creiamo le variabili dummy per l'orientamento (0 o 1)
     df_dummies = pd.get_dummies(data, columns=['Orientation'], prefix='Ori', drop_first=True)
-    print(df_dummies.columns.tolist())
     
     # 2. Prepariamo la matrice X rimuovendo i target e le variabili ridondanti
     X = df_dummies.drop(columns=[
@@ -320,8 +356,6 @@ if __name__ == "__main__":
     print(model_cooling.summary())
     #plot_residui(model_heating, "Heating Load")
     #plot_residui(model_cooling, "Cooling Load")
-
-    import numpy as np
     y_heating_log = np.log(data["Heating Load"]) 
     y_cooling_log = np.log(data["Cooling Load"])
 
@@ -352,32 +386,34 @@ if __name__ == "__main__":
     print("\n=== SUMMARY: COOLING LOAD (LOG) with White's Robust SE ===")
     print(model_cooling_log_white.summary())
 
+    X_reg = df_dummies.drop(columns=["Heating Load", "Cooling Load"]).astype(float)
+    _, best_params_heating = find_best_regularization(
+        X_reg, 
+        y_heating)
+    _, best_params_cooling = find_best_regularization(
+        X_reg, 
+        y_cooling
+    )
+    print("\nBest parameters for Heating Load Regularization:")
+    print(best_params_heating)
+    print("\nBest parameters for Cooling Load Regularization:")
+    print(best_params_cooling)
+    print("\n=== SUMMARY: HEATING LOAD (Regularized) ===")
+    X_reg = X_reg.apply(zscore)
+    X_final_reg = sm.add_constant(X_reg)
+    model_sm = sm.OLS(y_heating, X_final_reg)
+    results_sm = model_sm.fit_regularized(alpha=best_params_heating['alpha'], L1_wt=best_params_heating['l1_ratio'])
+    print(results_sm.params)
+    print("\n=== SUMMARY: COOLING LOAD (Regularized) ===")
+    model_sm_cooling = sm.OLS(y_cooling, X_final_reg)
+    results_sm_cooling = model_sm_cooling.fit_regularized(alpha=best_params_cooling['alpha'], L1_wt=best_params_cooling['l1_ratio'])
+    print(results_sm_cooling.params)
     #plot_residui(model_heating_wls, "Heating Load WLS")
     #plot_residui(model_cooling_wls, "Cooling Load WLS")
     #plot_residui(model_heating_fgls, "Heating Load FGLS")
     #plot_residui(model_cooling_fgls, "Cooling Load FGLS")
-    
-    wald_test = model_heating_fgls.wald_test(np.eye(len(model_heating_fgls.params))[1:])
-    print(f"Statistica Wald (Chi2): {wald_test.statistic.item():.2f}")
-    print(f"p-value Wald: {wald_test.pvalue:.4f}")
-    # 3. Confronto SE
-    confronto_h = confronta_errori_standard(model_heating_log, model_heating_log_white, "Heating Load")
-    print("\n" + "="*60)
-    print("8======================DConfronto DIO PORCO: ",confronto_h)
-
     # --- COOLING LOAD ---
     # 1. Modelli OLS (Base e HC3)
-    model_cooling_log = sm.OLS(y_cooling_log, X).fit()
-    model_cooling_log_white = sm.OLS(y_cooling_log, X).fit(cov_type='HC3')
-
-    # 2. Modelli GLS (WLS e FGLS)
-    model_cooling_wls, model_cooling_fgls = fit_robust_models(model_cooling_log, "Cooling")
-
-    # 3. Confronto SE
-    confronto_c = confronta_errori_standard(model_cooling_log, model_cooling_log_white, "Cooling Load")
-    print("\n" + "="*60)
-    print("Confronto: ",confronto_c)
-
     breusch_pagan_test(model_heating_log_white, "Heating Load WLS")
     breusch_pagan_test(model_cooling_log_white, "Cooling Load WLS")
     white_test(model_heating_log_white, "Heating Load WLS") 
